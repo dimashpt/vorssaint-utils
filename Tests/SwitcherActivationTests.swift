@@ -51,6 +51,74 @@ enum SwitcherActivationTests {
         static var setFrontProcess: ((UnsafeMutablePointer<ProcessSerialNumber>, CGWindowID, UInt32) -> CGError)?
         static var postEventRecord: ((UnsafeMutablePointer<ProcessSerialNumber>, UnsafeMutablePointer<UInt8>) -> CGError)?
     }
+
+    /// The production hidden-Space raise and source staging methods run with
+    /// inert elements. Only the orchestration is tested; macOS travel is not.
+    enum HiddenSpaceActivator {
+        final class Element: NSObject {
+            let pid: pid_t
+            let windowID: CGWindowID?
+            init(pid: pid_t, windowID: CGWindowID? = nil) {
+                self.pid = pid
+                self.windowID = windowID
+            }
+        }
+        struct PermissionState { var accessibility = true }
+        enum Permissions { static var shared = PermissionState() }
+        enum SpaceWindowBridge {
+            static var hiddenWindows: Set<CGWindowID> = []
+            static func isParkedOnHiddenSpace(_ windowID: CGWindowID) -> Bool {
+                hiddenWindows.contains(windowID)
+            }
+        }
+        static var transportEvents: [String] = []
+        static var missingWindows: Set<CGWindowID> = []
+        static var minimizedWindows: Set<CGWindowID> = []
+        static var raiseResult: AXError = .success
+
+        static func reset() {
+            Permissions.shared = PermissionState()
+            SpaceWindowBridge.hiddenWindows = []
+            transportEvents = []
+            missingWindows = []
+            minimizedWindows = []
+            raiseResult = .success
+        }
+        static func AXUIElementCreateApplication(_ pid: pid_t) -> Element {
+            transportEvents.append("app:\(pid)")
+            return Element(pid: pid)
+        }
+        @discardableResult
+        static func AXUIElementSetMessagingTimeout(_ element: Element, _ timeout: Float) -> AXError {
+            transportEvents.append("timeout:\(element.pid)")
+            return .success
+        }
+        static func axElement(windowID: CGWindowID, in app: Element, pid: pid_t? = nil) -> Element? {
+            let mode = pid.map { "remote:\($0)" } ?? "published"
+            transportEvents.append("resolve:\(windowID):\(app.pid):\(mode)")
+            guard !missingWindows.contains(windowID) else { return nil }
+            return Element(pid: app.pid, windowID: windowID)
+        }
+        static func AXUIElementCopyAttributeValue(_ element: Element, _ attribute: CFString,
+                                                  _ value: UnsafeMutablePointer<CFTypeRef?>) -> AXError {
+            transportEvents.append("read:\(element.windowID ?? 0):\(attribute)")
+            guard attribute as String == kAXMinimizedAttribute as String,
+                  let windowID = element.windowID else { return .attributeUnsupported }
+            value.pointee = NSNumber(value: minimizedWindows.contains(windowID))
+            return .success
+        }
+        @discardableResult
+        static func AXUIElementSetAttributeValue(_ element: Element, _ attribute: CFString,
+                                                 _ value: CFTypeRef) -> AXError {
+            transportEvents.append("set:\(element.windowID ?? 0):\(attribute)")
+            return .success
+        }
+        @discardableResult
+        static func AXUIElementPerformAction(_ element: Element, _ action: CFString) -> AXError {
+            transportEvents.append("action:\(element.windowID ?? 0):\(action)")
+            return raiseResult
+        }
+    }
     static func reset(raise: Bool = true, front: CGError = .success, down: CGError = .success, up: CGError = .success) {
         events = []; records = []; canRaise = raise
         App.executablePaths = [:]; App.names = [:]; App.hiddenPIDs = []
@@ -138,5 +206,73 @@ enum SwitcherActivationTests {
         select()
         suite.expect(events.contains("activate:20:false") && records.isEmpty,
                      "a failed Wine front request falls back to app activation without a mouse event")
+        runHiddenSpaceContracts(suite)
+    }
+
+    private static func runHiddenSpaceContracts(_ suite: TestSuite) {
+        typealias AX = HiddenSpaceActivator
+        func raise(pid: pid_t = 20) -> Bool {
+            AX.raiseWindowOnHiddenSpace(windowID: 77, pid: pid)
+        }
+        AX.reset(); AX.Permissions.shared.accessibility = false
+        suite.expect(!raise() && AX.transportEvents.isEmpty,
+                     "a hidden-Space raise does not query Accessibility without permission")
+        for pid in [pid_t(-1), 0, ProcessInfo.processInfo.processIdentifier] {
+            AX.reset()
+            suite.expect(!raise(pid: pid) && AX.transportEvents.isEmpty,
+                         "a hidden-Space raise rejects invalid or own process \(pid) before any AX call")
+        }
+        AX.reset(); AX.missingWindows = [77]
+        let unresolved = raise()
+        suite.expect(!unresolved && AX.transportEvents == ["app:20", "timeout:20", "resolve:77:20:remote:20"],
+                     "an unresolved hidden-Space target cannot mutate or raise another window")
+        for result in [AXError.success, .cannotComplete] {
+            AX.reset(); AX.raiseResult = result
+            let raised = raise()
+            suite.expect(raised == (result == .success),
+                         "hidden-Space raise reports the AX action result rather than resolution alone")
+            suite.expect(AX.transportEvents.last == "action:77:AXRaise"
+                            && AX.transportEvents.filter { $0.hasPrefix("action:") }.count == 1,
+                         "the hidden-Space action raises only the selected window")
+            suite.expect(AX.transportEvents.contains("resolve:77:20:remote:20"),
+                         "hidden-Space lookup opts into remote resolution for the actual window owner")
+        }
+
+        let windowPlan = SwitcherSupport.activationPlan(targetsSpecificWindow: true)
+        func stage(plan: SwitcherActivationPlan? = nil) -> Bool {
+            AX.stageSourceBehindTargetIfNeeded(targetWindowID: 77, targetPID: 20, targetWindowOwnerPID: 40,
+                                              sourcePID: 10, sourceWindowID: 55, sourceWindowOwnerPID: 30,
+                                              activationPlan: plan ?? windowPlan)
+        }
+        let hiddenCases: [Set<CGWindowID>] = [[55], [77], [55, 77]]
+        for hidden in hiddenCases {
+            AX.reset(); AX.SpaceWindowBridge.hiddenWindows = hidden
+            suite.expect(!stage() && AX.transportEvents.isEmpty,
+                         "source staging does not query or raise a window when either Space is hidden: \(hidden)")
+        }
+        AX.reset(); AX.Permissions.shared.accessibility = false
+        suite.expect(!stage() && AX.transportEvents.isEmpty,
+                     "source staging retains the Accessibility permission guard")
+        AX.reset()
+        suite.expect(!stage(plan: SwitcherSupport.activationPlan(targetsSpecificWindow: false))
+                        && AX.transportEvents.isEmpty,
+                     "app-only activation never stages a particular source window")
+        AX.reset()
+        let staged = stage()
+        suite.expect(staged && AX.transportEvents.filter { $0.hasPrefix("action:") }
+                        == ["action:55:AXRaise", "action:77:AXRaise"],
+                     "visible source staging preserves the source-then-target raise order")
+        suite.expect(AX.transportEvents.filter { $0.hasPrefix("resolve:") }
+                        == ["resolve:55:30:published", "resolve:77:40:published"],
+                     "source staging queries window owners and does not repeat remote scans")
+        AX.reset(); AX.minimizedWindows = [55]
+        suite.expect(!stage() && !AX.transportEvents.contains { $0.hasPrefix("action:") || $0.hasPrefix("set:") },
+                     "source staging leaves a minimized source untouched")
+        for missing in [CGWindowID(55), 77] {
+            AX.reset(); AX.missingWindows = [missing]
+            suite.expect(!stage() && !AX.transportEvents.contains { $0.hasPrefix("action:") || $0.hasPrefix("set:") },
+                         "source staging does not raise a substitute when window \(missing) cannot be resolved")
+        }
+        AX.reset()
     }
 }

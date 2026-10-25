@@ -17,6 +17,15 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 MUTATIONS = [
+    ("call audio protection is absent by default", "mixer",
+     "Sources/Vorssaint/Services/Audio/MixerRoutingSupport.swift",
+     "        if !allowCallAppVolume, needsScreenSharingProtection(bundleIdentifier: bundleIdentifier) {\n"
+     "            return true\n        }\n", "",
+     "com.hnc.Discord cannot be tapped by saved gain or routing while protected"),
+    ("call audio protection accepts an old engine build", "mixer",
+     "Sources/Vorssaint/Services/Audio/AppVolumeMixer.swift",
+     "        builds.invalidate(app.id)\n", "",
+     "com.hnc.Discord rejects late reads and builds without cancelling another app's build"),
     ("Vorssaint named as the secure input lead", "repository",
      "Sources/Vorssaint/Core/SecureInputSupport.swift",
      "                guard app.pid != ownPid else { return .unknown }\n", "",
@@ -332,11 +341,17 @@ MUTATIONS = [
      "        guard running, !suspended, watchesHiddenHover, windowHost != nil else {",
      "        guard running, !suspended, hiddenUntilHover, windowHost != nil else {",
      "a simulated cutout hidden in full screen keeps one pair of movement observers"),
-    ("a simulated cutout hidden in full screen follows the pointer for click opening", "notch",
+    ("a simulated cutout hidden in full screen follows the pointer with fullscreen hover off", "notch",
      "Sources/Vorssaint/Services/Notch/NotchService.swift",
-     "captureControls == nil\n            && UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover))",
+     "captureControls == nil\n            && hoverOpeningEnabled)",
      "captureControls == nil)",
      "a simulated cutout hidden in full screen waits for a shortcut when it opens on click"),
+    ("fullscreen hiding inherits the desktop hover preference", "notch",
+     "Sources/Vorssaint/Services/Notch/NotchService.swift",
+     "        hiddenInFullscreen ? UserDefaults.standard.bool(forKey: DefaultsKey.notchHoverInFullscreen)\n"
+     "            : UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover)",
+     "        UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover)",
+     "fullscreen hiding blocks hover unless separately enabled, on every display and opening mode"),
     ("moves over an island hidden in full screen hold its timed capture", "notch",
      "Sources/Vorssaint/Services/Notch/NotchService.swift",
      "        if !watchesHiddenHover { captureHover?(entered) }",

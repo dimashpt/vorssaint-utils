@@ -286,6 +286,22 @@ final class ScreenshotEditorModel: ObservableObject, BackdropEditing {
                                            factor: CGFloat(backdropStyle.cornerRadius))
     }
 
+    /// The card's outline, which its shadow follows: a window's own rounded
+    /// corners when they are rounder than the user's, as the exporter draws.
+    var cardOutlineCornerPixels: CGFloat {
+        max(cardCornerPixels, baseImageCornerPixels)
+    }
+
+    /// Read once per picture: a crop or a canvas change makes a new one.
+    private var measuredBaseImageCorner: (image: CGImage, radius: CGFloat)?
+
+    private var baseImageCornerPixels: CGFloat {
+        if let measured = measuredBaseImageCorner, measured.image === baseImage { return measured.radius }
+        let radius = ScreenshotSupport.transparentCornerRadius(of: baseImage)
+        measuredBaseImageCorner = (baseImage, radius)
+        return radius
+    }
+
     /// True when something actually paints behind the capture (an image
     /// backdrop whose file vanished counts as nothing).
     var showsBackdrop: Bool {

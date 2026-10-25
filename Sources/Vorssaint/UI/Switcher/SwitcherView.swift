@@ -15,6 +15,33 @@ private enum SwitcherIconStyle {
     static let thumbnailBackground = Color.primary.opacity(0.055)
 }
 
+/// A panel of the icon row. Those panels float on the desktop on their own
+/// instead of sitting inside one backdrop like the window grid, so each one
+/// draws its own: Liquid Glass when the app's setting asks for it, the solid
+/// surface otherwise.
+private struct SwitcherIconRowSurface: View {
+    let cornerRadius: CGFloat
+    let fill: Color
+    var stroke: Color = SwitcherIconStyle.stroke
+
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @AppStorage(DefaultsKey.liquidGlassEnabled) private var liquidGlassEnabled = false
+
+    var body: some View {
+        if HUDBackdrop.drawsLiquidGlass(enabled: liquidGlassEnabled, reduceTransparency: reduceTransparency) {
+            // The backdrop draws its own edge.
+            HUDBackdrop(cornerRadius: cornerRadius)
+        } else {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(fill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(stroke, lineWidth: 1)
+                )
+        }
+    }
+}
+
 private struct SwitcherHiddenAppBadge: ViewModifier {
     let isHidden: Bool
     let size: CGFloat
@@ -251,12 +278,8 @@ struct SwitcherView: View {
         .frame(width: min(SwitcherIconRowLayout.hintBarWidth, iconRowContentWidth),
                height: SwitcherIconRowLayout.hintHeight)
         .background(
-            Capsule(style: .continuous)
-                .fill(SwitcherIconStyle.surfaceRaised)
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(SwitcherIconStyle.stroke, lineWidth: 1)
+            SwitcherIconRowSurface(cornerRadius: SwitcherIconRowLayout.hintHeight / 2,
+                                   fill: SwitcherIconStyle.surfaceRaised)
         )
     }
 
@@ -359,12 +382,9 @@ struct SwitcherView: View {
                 .frame(width: switcher.iconRowLayout.previewSurfaceWidth,
                        height: SwitcherIconRowLayout.previewHeight)
                 .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(SwitcherIconStyle.surfaceRaised)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(minimalPreviews ? Color.clear : SwitcherIconStyle.stroke, lineWidth: 1)
+                    SwitcherIconRowSurface(cornerRadius: 18,
+                                           fill: SwitcherIconStyle.surfaceRaised,
+                                           stroke: minimalPreviews ? Color.clear : SwitcherIconStyle.stroke)
                 )
                 .shadow(color: Color.black.opacity(0.24), radius: 10, x: 0, y: 5)
                 .offset(x: placement.leading)
@@ -452,12 +472,7 @@ struct SwitcherView: View {
                    height: SwitcherIconRowLayout.simpleTitleHeight,
                    alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .fill(SwitcherIconStyle.surfaceRaised)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .strokeBorder(SwitcherIconStyle.stroke, lineWidth: 1)
+                SwitcherIconRowSurface(cornerRadius: 15, fill: SwitcherIconStyle.surfaceRaised)
             )
             .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 4)
         }
@@ -467,12 +482,7 @@ struct SwitcherView: View {
         iconRow
             .padding(.horizontal, SwitcherIconRowLayout.rowHorizontalPadding)
             .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(SwitcherIconStyle.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(SwitcherIconStyle.stroke, lineWidth: 1)
+                SwitcherIconRowSurface(cornerRadius: 22, fill: SwitcherIconStyle.surface)
             )
             .shadow(color: Color.black.opacity(0.22), radius: 10, x: 0, y: 5)
             .frame(width: switcher.iconRowLayout.appRowSurfaceWidth,

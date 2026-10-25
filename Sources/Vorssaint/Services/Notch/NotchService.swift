@@ -269,6 +269,8 @@ final class NotchService: ObservableObject {
     private var ownInputSourceID: String?
     private var notchNeedsMonitor = false
     private var menuSpaceTimer: Timer?
+    private var appFullscreenTimer: Timer?
+    private var appFullscreenDisplays: Set<CGDirectDisplayID> = []
     private var menuSpaceReading = false
     private var menuSpaceGeneration = 0
     private var menuBarMeasurements = NotchMenuBarMeasurements()
@@ -435,11 +437,18 @@ final class NotchService: ObservableObject {
         fullscreenCompact && !geometry.isNotched
     }
 
+    /// Full-screen hover is opt-in independently of the opening mode used
+    /// on the desktop. Hiding full-screen content alone never enables it.
+    private var hoverOpeningEnabled: Bool {
+        hiddenInFullscreen ? UserDefaults.standard.bool(forKey: DefaultsKey.notchHoverInFullscreen)
+            : UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover)
+    }
+
     /// Out of sight at rest, the island has no window for the pointer to
     /// enter, so hover follows the pointer over its place instead.
     private var watchesHiddenHover: Bool {
         hiddenUntilHover || (hiddenAtRestInFullscreen && !dragPlaceholder && captureControls == nil
-            && UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover))
+            && hoverOpeningEnabled)
     }
 
     /// A Mac without a battery has no charge to show, so a saved battery
@@ -1140,6 +1149,7 @@ final class NotchService: ObservableObject {
         showsOnAllDisplays = displayPreference == .all
         updateFullscreenDisplays()
         updateScreen()
+        syncAppFullscreenMonitoring()
         syncPointerFollowing()
         syncGestures()
         NotchTimerService.shared.syncWithPreferences()
@@ -1248,6 +1258,7 @@ final class NotchService: ObservableObject {
 
     private func tearDownPresentation() {
         screenRefreshWork?.cancel(); screenRefreshWork = nil
+        stopAppFullscreenMonitoring()
         nextMascotVisitWork?.cancel(); nextMascotVisitWork = nil
         mascotVisitWork?.cancel(); mascotVisitWork = nil
         mascotStepBackWork?.cancel(); mascotStepBackWork = nil
@@ -1530,7 +1541,7 @@ final class NotchService: ObservableObject {
         let unnamesMusic = inside != wasInside && endMusicStripHover(leaving: !inside)
         // A full hover opening goes straight from its resting size to the page.
         // The activity picker replaces that opening and keeps its hover response.
-        let opensOnHover = UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover)
+        let opensOnHover = hoverOpeningEnabled
             && UserDefaults.standard.bool(forKey: DefaultsKey.notchHoverExpands) && !showsCompactActivityPicker
         let emphasize = inside && !hiddenInFullscreen && !hiddenUntilHover && !expanded && !peeking && !dragPlaceholder
             && notice == nil && captureControls == nil && !opensOnHover
@@ -1569,7 +1580,7 @@ final class NotchService: ObservableObject {
         if inside {
             if holdsNotification, let id = notice?.notificationID { holdNotification(id); return }
             guard !hoverState.suppressed, (notice == nil || hiddenUntilHover), !expanded, !peeking, !dragPlaceholder,
-                  UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover) else { return }
+                  hoverOpeningEnabled else { return }
             if !hiddenInFullscreen, compactActivity != nil, compactActivityGeometry.compactActivityWingWidth > 0,
                !UserDefaults.standard.bool(forKey: DefaultsKey.notchHoverExpands) { return }
             let work = DispatchWorkItem { [weak self] in
@@ -1582,7 +1593,7 @@ final class NotchService: ObservableObject {
                       !self.expanded, !self.peeking, !self.pinned, !self.heldDrag, !self.keepsWorkingSurface,
                       !self.showsCompactActivityPicker,
                       self.captureControls == nil, (self.notice == nil || self.hiddenUntilHover), !self.dragPlaceholder,
-                      UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover),
+                      self.hoverOpeningEnabled,
                       self.windowHost?.blocksHoverReveal() == false,
                       self.geometry.contains(NSEvent.mouseLocation, in: self.watchesHiddenHover ? self.geometry.collapsed : self.surfaceSize) else { return }
                 // Following the closed island ends as it opens or peeks.
@@ -1634,7 +1645,7 @@ final class NotchService: ObservableObject {
         // restarts its dismissal under a pointer that came back to reopen it.
         let followsClosedHover = inside && !expanded && !peeking && notice == nil
             && (hoverWork?.isCancelled == false
-                || hoverState.suppressed && UserDefaults.standard.bool(forKey: DefaultsKey.notchOpenOnHover))
+                || hoverState.suppressed && hoverOpeningEnabled)
         // The music strip's name, or a song paused from its button, lasts
         // until the pointer leaves, with or without an emphasis to follow.
         let keepsMusicStrip = musicStripNamed || musicStripHeldSong != nil
@@ -2730,6 +2741,10 @@ final class NotchService: ObservableObject {
     }
 
     private func syncHiddenHoverMonitoring() {
+        if fullscreenCompact, !hoverOpeningEnabled {
+            hoverWork?.cancel(); hoverWork = nil
+            removeHoverExitMonitors()
+        }
         guard running, !suspended, watchesHiddenHover, windowHost != nil else {
             removeHiddenHoverMonitors()
             return
@@ -3128,11 +3143,13 @@ final class NotchService: ObservableObject {
     /// Only the copies ask which displays are in full screen, and only when
     /// the island hides there; the island asks for its own display.
     private func updateFullscreenDisplays() {
-        guard showsOnAllDisplays, UserDefaults.standard.bool(forKey: DefaultsKey.notchHideInFullscreen),
-              let topology = SpaceWindowBridge.topology() else { fullscreenDisplays = []; return }
+        guard showsOnAllDisplays, UserDefaults.standard.bool(forKey: DefaultsKey.notchHideInFullscreen)
+        else { fullscreenDisplays = []; return }
+        let covered = NotchAppFullscreen.coveredDisplays()
+        guard let topology = SpaceWindowBridge.topology() else { fullscreenDisplays = covered; return }
         let separate = NSScreen.screensHaveSeparateSpaces
         fullscreenDisplays = Set(NSScreen.screens.map(\.notchDisplayID).filter {
-            topology.isFullscreen(on: $0, separateSpaces: separate)
+            topology.isFullscreen(on: $0, separateSpaces: separate) || covered.contains($0)
         })
     }
 
@@ -3458,8 +3475,11 @@ final class NotchService: ObservableObject {
     }
 
     private func updateFullscreenVisibility(displayID: CGDirectDisplayID) {
+        // A game's own full screen leaves the desktop Space in place, so the
+        // frontmost app's windows are read when the Space is not full screen.
         let hidden = UserDefaults.standard.bool(forKey: DefaultsKey.notchHideInFullscreen)
-            && SpaceWindowBridge.topology()?.isFullscreen(on: displayID, separateSpaces: NSScreen.screensHaveSeparateSpaces) == true
+            && (SpaceWindowBridge.topology()?.isFullscreen(on: displayID, separateSpaces: NSScreen.screensHaveSeparateSpaces) == true
+                || NotchAppFullscreen.coveredDisplays().contains(displayID))
         guard hidden != hiddenInFullscreen else { return }
         hiddenInFullscreen = hidden
         if hidden {
@@ -3496,6 +3516,37 @@ final class NotchService: ObservableObject {
         guard hiddenInFullscreen != wasHidden else { return }
         syncVisibleConsumers()
         refreshPresentation(animated: false)
+    }
+
+    /// A game can enter or leave its own full screen while it stays
+    /// frontmost, with no Space or app change to announce it. A light poll
+    /// follows that only while the island hides in full screen.
+    private func syncAppFullscreenMonitoring() {
+        guard running, !suspended, UserDefaults.standard.bool(forKey: DefaultsKey.notchHideInFullscreen) else {
+            stopAppFullscreenMonitoring()
+            return
+        }
+        appFullscreenDisplays = NotchAppFullscreen.coveredDisplays()
+        guard appFullscreenTimer == nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.readAppFullscreen() }
+        timer.tolerance = 0.3
+        appFullscreenTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopAppFullscreenMonitoring() {
+        appFullscreenTimer?.invalidate()
+        appFullscreenTimer = nil
+        appFullscreenDisplays = []
+    }
+
+    /// Only a change reevaluates the island, so a steady game costs one
+    /// window list read per second.
+    private func readAppFullscreen() {
+        let covered = NotchAppFullscreen.coveredDisplays()
+        guard covered != appFullscreenDisplays else { return }
+        appFullscreenDisplays = covered
+        fullscreenEnvironmentDidChange()
     }
 
     private func installObservers() {

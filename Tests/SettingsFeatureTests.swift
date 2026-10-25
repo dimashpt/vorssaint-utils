@@ -27,6 +27,14 @@ enum SettingsFeatureTests {
         // MARK: Settings backup
 
         let backupKeys = SettingsBackupSupport.exportKeys()
+        for reserved in [false, true] {
+            let backup = SettingsBackupSupport.payload(appVersion: "test") { key in
+                key == DefaultsKey.windowReserveStageManagerSpace ? reserved : nil
+            }
+            suite.expect(SettingsBackupSupport.sanitizedSettings(from: backup)?[
+                DefaultsKey.windowReserveStageManagerSpace] as? Bool == reserved,
+                "Stage Manager reservation survives a settings backup round trip")
+        }
         let marginBackup = SettingsBackupSupport.payload(appVersion: "test") { key in
             key == DefaultsKey.windowLayoutMarginPercent ? 12.0 : nil
         }
@@ -245,8 +253,11 @@ enum SettingsFeatureTests {
                "the radial menu wheel and choices travel with the settings backup")
         suite.expect(backupKeys.contains(DefaultsKey.mouseButtonShortcutsEnabled)
                 && backupKeys.contains(DefaultsKey.mouseButtonShortcuts)
+                && backupKeys.contains(DefaultsKey.mouseSpacesGestureEnabled)
+                && backupKeys.contains(DefaultsKey.mouseSpacesGestureButton)
+                && backupKeys.contains(DefaultsKey.mouseSpacesGestureFollowsDrag)
                 && backupKeys.contains(DefaultsKey.panelControlMouseButtonShortcuts),
-               "mouse button shortcuts travel with the settings backup")
+               "mouse button shortcuts and the Spaces drag binding travel with the settings backup")
         suite.expect(backupKeys.contains(DefaultsKey.mouseClickDebounceEnabled)
                 && backupKeys.contains(DefaultsKey.mouseClickDebounceWindowMs)
                 && backupKeys.contains(DefaultsKey.panelControlMouseClickDebounce),

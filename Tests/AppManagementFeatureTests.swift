@@ -1089,6 +1089,13 @@ enum AppManagementFeatureTests {
                && CleanerSupport.bundleIDCandidate(fromEntryName: "com.v2.editor")
                 == "com.v2.editor",
                "version directories never become deletion ownership evidence")
+        suite.expect(CleanerSupport.bundleIDCandidate(fromEntryName: "MCXTools.log") == nil
+               && CleanerSupport.bundleIDCandidate(fromEntryName: "LKDC-setup.log") == nil
+               && CleanerSupport.bundleIDCandidate(fromEntryName: "install.LOG") == nil,
+               "a plain log file name is never read as an uninstalled app's identifier")
+        suite.expect(CleanerSupport.bundleIDCandidate(fromEntryName: "com.vendor.editor.log")
+                == "com.vendor.editor",
+               "a log named after its app still unwraps to that app")
         let supportRoot = URL(fileURLWithPath: "/Users/tester/Library/Application Support")
         suite.expect(CleanerSupport.isDirectChild(
                    supportRoot.appendingPathComponent("com.vendor.editor"), of: supportRoot)

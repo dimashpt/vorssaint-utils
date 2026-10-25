@@ -42,6 +42,7 @@ struct NotchSettings: View {
     @AppStorage(DefaultsKey.notchOpenOnHover) private var hover = false
     @AppStorage(DefaultsKey.notchShortcutEnabled) private var shortcutEnabled = false
     @AppStorage(DefaultsKey.notchHideInFullscreen) private var hideInFullscreen = false
+    @AppStorage(DefaultsKey.notchHoverInFullscreen) private var hoverInFullscreen = false
     @AppStorage(DefaultsKey.notchHideUntilHover) private var hideUntilHover = false
     @AppStorage(DefaultsKey.notchHiddenShowsActivity) private var hiddenShowsActivity = false
     @AppStorage(DefaultsKey.notchCoversMenus) private var coversMenus = true
@@ -122,7 +123,8 @@ struct NotchSettings: View {
          String(customWidth), String(customHeight), String(cameraFitWidth), String(cameraFitHeight),
          String(capsuleFitWidth), String(capsuleFitHeight), String(capsuleFitDrop), String(hapticFeedback),
          String(shelfWindow), String(dragReveal), String(captureControls), String(quickPanel), String(appPanel),
-         String(hoverExpand), String(hideUntilHover), String(hiddenShowsActivity), String(hideInFullscreen), String(coversMenus),
+         String(hoverExpand), String(hideUntilHover), String(hiddenShowsActivity), String(hideInFullscreen),
+         String(hoverInFullscreen), String(coversMenus),
          display, silhouette, String(hover), hidden, order, String(volume), String(inputSource),
          String(brightness), String(keyboardLight),
          String(microphone), String(battery), String(clipboard), String(clipboardWindow), clipboardCardSize,
@@ -647,7 +649,7 @@ struct NotchSettings: View {
                     switchRow("sparkles", editor.hiddenShowsActivity,
                               caption: hiddenShowsActivity ? editor.hiddenShowsActivityHint : nil, isOn: $hiddenShowsActivity)
                 }
-                if hover {
+                if hover || (hideInFullscreen && hoverInFullscreen) {
                     hoverDelayControl
                     if hoverExpand { closeDelayControl }
                 }
@@ -695,6 +697,10 @@ struct NotchSettings: View {
             }
             SettingsCard(title: text.display) {
                 switchRow("arrow.up.left.and.arrow.down.right", text.hideInFullscreen, isOn: $hideInFullscreen)
+                if hideInFullscreen {
+                    switchRow("cursorarrow", text.hoverInFullscreen, isOn: $hoverInFullscreen)
+                        .padding(.leading, settingsRowTextInset)
+                }
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     // A mode this version no longer offers is treated as automatic, as the island does.
                     choice(text.automatic, symbol: "display.2",

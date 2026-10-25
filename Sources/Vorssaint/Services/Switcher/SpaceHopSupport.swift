@@ -24,8 +24,9 @@ enum SpaceHopSupport {
     /// window where the user is already looking. With one there, activating
     /// just raises that window, so waiting for a travel that cannot happen is
     /// pure delay and the hop asks for the move immediately (issue #422).
-    /// However, when direct window raise succeeded via Accessibility, the window server
-    /// directly initiates travel to the target Space without synthetic shortcuts (issue #2210).
+    /// An accepted Accessibility raise gets a chance to travel directly to the
+    /// target Space. Arrival still has to be verified; success is only an
+    /// acknowledgement of the request (issue #2210).
     static func firstStage(appHasWindowOnVisibleSpace: Bool,
                            directRaiseSucceeded: Bool = false) -> FirstStage {
         if directRaiseSucceeded { return .waitForActivationTravel }
