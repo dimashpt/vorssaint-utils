@@ -33,10 +33,23 @@ final class WindowUseTracker {
     /// servicing its run loop.
     private static let messagingTimeout: Float = 0.35
 
+    /// How long an explicit switcher commit shields the target app from
+    /// transient activation or focus readings of a sibling window while the
+    /// target window and its Space settle into frontmost focus.
+    private static let switchSettleTimeout: CFAbsoluteTime = 1.5
+
+    private struct PendingSwitch {
+        let windowID: CGWindowID
+        let pid: pid_t
+        let deadline: CFAbsoluteTime
+        var confirmed = false
+    }
+
     private let stateLock = NSLock()
     private var windowHistory: [CGWindowID] = []
     private var appHistory: [pid_t] = []
     private var focusHistory = WindowFocusHistory()
+    private var pendingSwitch: PendingSwitch?
     /// False from the moment the feature is switched off. The watcher thread is
     /// stopped from the outside and never joined, so without this a callback
     /// already in flight could write a window back into a history that was
@@ -75,18 +88,43 @@ final class WindowUseTracker {
         stateLock.withLock { appHistory.firstIndex(of: pid) ?? Int.max }
     }
 
+    /// The window an explicit switcher commit is currently bringing to the
+    /// front for `pid`, while its Space or focus transition is still settling.
+    func inFlightSwitchWindow(for pid: pid_t) -> CGWindowID? {
+        stateLock.withLock {
+            guard let pending = pendingSwitch else { return nil }
+            guard pending.pid == pid, CFAbsoluteTimeGetCurrent() < pending.deadline else {
+                if CFAbsoluteTimeGetCurrent() >= pending.deadline { pendingSwitch = nil }
+                return nil
+            }
+            return pending.windowID
+        }
+    }
+
     /// Records a switch the switcher itself performed. `previous` becomes the
     /// second-most-recent window, so a quick repeat toggles straight back.
     /// Applied immediately because the window server's order lags an
     /// activation by a frame or two, and a flick is faster than that.
     func recordSwitch(to windowID: CGWindowID?, pid: pid_t, from previous: CGWindowID?) {
-        stateLock.withLock {
-            guard recording else { return }
+        let request = stateLock.withLock { () -> WindowFocusHistory.Request? in
+            guard recording else { return nil }
             focusHistory.switched(to: windowID, pid: pid, previous: previous)
             windowHistory = WindowUseOrder.promoting(target: windowID,
                                                      previous: previous,
                                                      in: windowHistory)
+            appHistory = WindowUseOrder.promoting(pid, in: appHistory)
+            if let windowID {
+                pendingSwitch = PendingSwitch(
+                    windowID: windowID,
+                    pid: pid,
+                    deadline: CFAbsoluteTimeGetCurrent() + Self.switchSettleTimeout
+                )
+            } else {
+                pendingSwitch = nil
+            }
+            return focusHistory.current
         }
+        performOnWatcher { [weak self] in self?.retargetObserver(request: request) }
     }
 
     /// Drops what no longer exists and files windows that were never focused,
@@ -154,6 +192,8 @@ final class WindowUseTracker {
                            name: NSWorkspace.didActivateApplicationNotification, object: nil)
         center.addObserver(self, selector: #selector(appTerminated(_:)),
                            name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+        center.addObserver(self, selector: #selector(spaceChanged(_:)),
+                           name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         if let front = NSWorkspace.shared.frontmostApplication {
             promote(app: front.processIdentifier)
             stateLock.withLock { _ = focusHistory.activate(front.processIdentifier) }
@@ -169,6 +209,7 @@ final class WindowUseTracker {
             windowHistory.removeAll()
             appHistory.removeAll()
             focusHistory = WindowFocusHistory()
+            pendingSwitch = nil
         }
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         stopWatcher()
@@ -190,8 +231,44 @@ final class WindowUseTracker {
         // window half needs Accessibility and happens on the watcher thread.
         let request = stateLock.withLock { () -> WindowFocusHistory.Request? in
             guard recording else { return nil }
-            if !own { appHistory = WindowUseOrder.promoting(pid, in: appHistory) }
-            return focusHistory.activate(pid, recording: !own)
+            if let pending = pendingSwitch, CFAbsoluteTimeGetCurrent() >= pending.deadline {
+                pendingSwitch = nil
+            }
+            if own {
+                if let pending = pendingSwitch, focusHistory.current?.pid == pending.pid {
+                    return focusHistory.current
+                }
+                return focusHistory.activate(pid, recording: false)
+            }
+            appHistory = WindowUseOrder.promoting(pid, in: appHistory)
+            if let pending = pendingSwitch {
+                if pending.pid == pid, let current = focusHistory.current, current.pid == pid {
+                    return current
+                }
+                if pending.pid != pid {
+                    pendingSwitch = nil
+                }
+            }
+            return focusHistory.activate(pid, recording: true)
+        }
+        performOnWatcher { [weak self] in self?.retargetObserver(request: request) }
+    }
+
+    @objc private func spaceChanged(_ note: Notification) {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        let pid = app.processIdentifier
+        let own = pid == ProcessInfo.processInfo.processIdentifier && ActivationHandoff.isHandingOff
+        guard !own else { return }
+        let request = stateLock.withLock { () -> WindowFocusHistory.Request? in
+            guard recording else { return nil }
+            if let pending = pendingSwitch, CFAbsoluteTimeGetCurrent() >= pending.deadline {
+                pendingSwitch = nil
+            }
+            appHistory = WindowUseOrder.promoting(pid, in: appHistory)
+            if let current = focusHistory.current, current.pid == pid {
+                return current
+            }
+            return focusHistory.activate(pid)
         }
         performOnWatcher { [weak self] in self?.retargetObserver(request: request) }
     }
@@ -200,6 +277,7 @@ final class WindowUseTracker {
         guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
         let pid = app.processIdentifier
         stateLock.withLock {
+            if pendingSwitch?.pid == pid { pendingSwitch = nil }
             appHistory.removeAll { $0 == pid }
             focusHistory.terminated(pid)
         }
@@ -380,7 +458,26 @@ final class WindowUseTracker {
         else { return false }
         // A misbehaving app can answer with something that is not an element.
         let window = value as! AXUIElement
-        guard let windowID = AXWindowResolver.windowID(for: window) else { return false }
+        guard let windowID = AXWindowResolver.windowID(for: window),
+              !SpaceWindowBridge.isParkedOnHiddenSpace(windowID) else { return false }
+        let allowed = stateLock.withLock { () -> Bool in
+            guard var pending = pendingSwitch else { return true }
+            if CFAbsoluteTimeGetCurrent() >= pending.deadline || pending.pid != request.pid {
+                pendingSwitch = nil
+                return true
+            }
+            if windowID == pending.windowID {
+                pending.confirmed = true
+                pendingSwitch = pending
+                return true
+            }
+            if !pending.confirmed {
+                return false
+            }
+            pendingSwitch = nil
+            return true
+        }
+        guard allowed else { return false }
         promote(window: windowID, for: request)
         return true
     }
@@ -405,22 +502,30 @@ final class WindowUseTracker {
         let apps: [pid_t]
     }
 
-    /// On-screen windows and their applications, front to back. This is real
-    /// z-order, and for anything never seen taking focus it is the only
-    /// evidence of how recently it was used.
+    /// Windows and their applications across Spaces, front to back. This is
+    /// real WindowServer z-order, and for anything never seen taking focus
+    /// (including fullscreen windows on other Spaces) it is the only evidence
+    /// of how recently it was used.
     static func frontToBack() -> FrontToBack {
-        let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+        let raw = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements],
                                              kCGNullWindowID) as? [[String: Any]] ?? []
         var windows: [CGWindowID] = []
+        var fallbackWindows: [CGWindowID] = []
         var apps: [pid_t] = []
         var seenApps = Set<pid_t>()
         for entry in raw where (entry[kCGWindowLayer as String] as? Int) == 0 {
             guard let windowID = entry[kCGWindowNumber as String] as? CGWindowID else { continue }
-            windows.append(windowID)
-            if let pid = entry[kCGWindowOwnerPID as String] as? pid_t, seenApps.insert(pid).inserted {
-                apps.append(pid)
+            let isOnScreen = (entry[kCGWindowIsOnscreen as String] as? Bool) == true
+            if isOnScreen || !SpaceWindowBridge.spaces(of: windowID).isEmpty {
+                windows.append(windowID)
+                if let pid = entry[kCGWindowOwnerPID as String] as? pid_t, seenApps.insert(pid).inserted {
+                    apps.append(pid)
+                }
+            } else {
+                fallbackWindows.append(windowID)
             }
         }
+        windows.append(contentsOf: fallbackWindows)
         return FrontToBack(windows: windows, apps: apps)
     }
 

@@ -1171,7 +1171,13 @@ final class AppSwitcher: ObservableObject {
     }
 
     private func focusedWindowID(for pid: pid_t, accessibilityGranted: Bool) -> CGWindowID? {
-        guard accessibilityGranted else { return nil }
+        if let inFlight = WindowUseTracker.shared.inFlightSwitchWindow(for: pid),
+           !SpaceWindowBridge.isParkedOnHiddenSpace(inFlight) {
+            return inFlight
+        }
+        guard accessibilityGranted else {
+            return WindowUseTracker.shared.inFlightSwitchWindow(for: pid)
+        }
         let app = AXUIElementCreateApplication(pid)
         // This runs on the serial session enumeration queue. A hung frontmost
         // app must not delay this session for the 6s default AX timeout.
@@ -1180,9 +1186,15 @@ final class AppSwitcher: ObservableObject {
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &value) == .success,
               let value,
               CFGetTypeID(value) == AXUIElementGetTypeID()
-        else { return nil }
+        else { return WindowUseTracker.shared.inFlightSwitchWindow(for: pid) }
         let window = value as! AXUIElement
-        return AXWindowResolver.windowID(for: window)
+        guard let windowID = AXWindowResolver.windowID(for: window) else {
+            return WindowUseTracker.shared.inFlightSwitchWindow(for: pid)
+        }
+        if SpaceWindowBridge.isParkedOnHiddenSpace(windowID) {
+            return WindowUseTracker.shared.inFlightSwitchWindow(for: pid)
+        }
+        return windowID
     }
 
     /// Records a switch straight away instead of waiting for the window server

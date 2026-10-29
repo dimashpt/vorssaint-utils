@@ -147,9 +147,12 @@ enum SwitcherFullscreenScopeTests {
     final class Tracker {
         static let shared = Tracker()
         let historyRevision: UInt64 = 0
+        var lastReconciledWindows: Set<CGWindowID> = []
         static func frontToBack() -> [CGWindowID] { [] }
         func reconcile(existingWindows: Set<CGWindowID>, frontToBack: [CGWindowID],
-                       running: Set<pid_t>, revision: UInt64) {}
+                       running: Set<pid_t>, revision: UInt64) {
+            lastReconciledWindows = existingWindows
+        }
         func rank(of pid: pid_t) -> Int { Int(pid) }
     }
 
@@ -214,6 +217,8 @@ enum SwitcherFullscreenScopeTests {
                                                         preservingGroupedWindows: false, snapshot: snapshot)
         }
         let scoped = enumerate(currentSpaceOnly: true)
+        suite.expect(Tracker.shared.lastReconciledWindows == [1, 2, 3, 4, 5, 6],
+                     "use-history reconciliation keeps Accessibility-only fullscreen and off-Space windows")
         suite.expect(Set(scoped.items.compactMap(\.windowID)) == [1, 3, 4, 6],
                      "current-desktop mode retains native fullscreen windows from both enumeration passes")
         let fullscreenTargets = scoped.items.filter { [3, 4, 6].contains($0.windowID) }

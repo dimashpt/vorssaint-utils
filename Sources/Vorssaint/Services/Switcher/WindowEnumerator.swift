@@ -292,14 +292,6 @@ enum WindowEnumerator {
         let bundleIdentifiers = SwitcherSupport.firstValuesByPID(runningApps.compactMap { app in
             app.bundleIdentifier.map { (app.pid, $0) }
         })
-        // Bring the use history up to date before ordering by it: windows that
-        // are gone leave, and any window that appeared without ever taking
-        // focus is filed by the window server's front-to-back order.
-        let frontToBack = WindowUseTracker.frontToBack()
-        WindowUseTracker.shared.reconcile(
-            existingWindows: Set(raw.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }),
-            frontToBack: frontToBack,
-            running: Set(runningApps.map(\.pid)), revision: historyRevision)
         var regularApps: [pid_t: String] = [:]
         var regularBundlePaths: [pid_t: String] = [:]
         for app in runningApps where app.isRegular {
@@ -348,6 +340,21 @@ enum WindowEnumerator {
                                                         screenFrames: snapshot.screenFrames,
                                                         isCancelled: isCancelled)
         guard !isCancelled() else { return WindowList(items: [], sourceItems: []) }
+
+        // Bring the use history up to date before ordering by it: windows that
+        // are gone leave, and any window that appeared without ever taking
+        // focus is filed by the window server's front-to-back order. Include
+        // Accessibility-described windows so off-Space fullscreen windows are
+        // never dropped if WindowServer omits them from the raw list.
+        var existingWindows = Set(raw.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        for list in accessibilityWindows.values {
+            existingWindows.formUnion(list.byID.keys)
+        }
+        let frontToBack = WindowUseTracker.frontToBack()
+        WindowUseTracker.shared.reconcile(
+            existingWindows: existingWindows,
+            frontToBack: frontToBack,
+            running: Set(runningApps.map(\.pid)), revision: historyRevision)
 
         var seen = Set<CGWindowID>()
         var windows: [SwitcherItem] = []
